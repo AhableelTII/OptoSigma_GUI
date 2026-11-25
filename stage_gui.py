@@ -12,7 +12,7 @@ positions are true even if the stage was moved by hand or power-cycled.
 The stage moves as soon as the window opens.
 
 Controls: step size (steps or mm) with Backward/Forward, single +/-1 step,
-Go to zero, Re-zero, and STOP. Targets outside the stage's travel (-9900 to
+Go to zero, Re-zero, Max scan (positive end -> negative end -> zero), and STOP. Targets outside the stage's travel (-9900 to
 +9900 steps from zero, 0.1 mm clear of each end) are refused.
 """
 
@@ -35,6 +35,7 @@ class StageApp:
         self.ui = queue.Queue()            # updates from the worker, applied on the Tk thread
         self.busy = False
         self.position = None
+        self.stop_requested = False        # set by STOP; ends a multi-move job like Max scan
 
         root.title("Stage Control" + (" (SIMULATED)" if simulate else ""))
         root.resizable(False, False)
@@ -101,13 +102,14 @@ class StageApp:
         mbtn("+1 step", lambda: self.move_by(+1), 2, 2, 3)
         mbtn("Go to zero", self.go_zero, 3, 0, 2)
         mbtn("Re-zero (home switch)", self.rezero, 3, 2, 3)
+        mbtn(f"Max scan:  {MAX_STEPS:+d}  ->  {MIN_STEPS:+d}  ->  0", self.max_scan, 4, 0, 5)
         stop = tk.Button(move, text="STOP", command=self.stop, bg="#c62828", fg="white",
                          activebackground="#8e0000", activeforeground="white",
                          font=("TkDefaultFont", 12, "bold"))
-        stop.grid(row=4, column=0, columnspan=5, sticky="ew", **pad)
+        stop.grid(row=5, column=0, columnspan=5, sticky="ew", **pad)
         ttk.Label(move, text=f"Negative (-) is toward the home switch. Travel: {MIN_STEPS:+d} to "
                              f"{MAX_STEPS:+d} steps ({MIN_STEPS * MM_PER_STEP:+.2f} to {MAX_STEPS * MM_PER_STEP:+.2f} mm).",
-                  foreground="gray30").grid(row=5, column=0, columnspan=5, sticky="w", **pad)
+                  foreground="gray30").grid(row=6, column=0, columnspan=5, sticky="w", **pad)
 
         logf = ttk.LabelFrame(main, text="Log", padding=6)
         logf.grid(row=3, column=0, sticky="ew", **pad)
@@ -183,6 +185,7 @@ class StageApp:
         if self.busy:
             return
         self.busy = True
+        self.stop_requested = False
         self._set_buttons(False)
         self.jobs.put((name, fn))
 
@@ -198,12 +201,13 @@ class StageApp:
         self.ui.put(("state", ("Ready", "green")))
 
     def _do_move_to(self, target):
+        """Move to target; returns True if it got there (False after STOP or a limit switch)."""
         if not in_travel(target):
             raise StageError(f"Target {target:+d} steps is outside the travel ({MIN_STEPS:+d} to {MAX_STEPS:+d}).")
         start = self.stage.position()
         if target == start:
             self.ui.put(("log", f"Already at {target:+d}."))
-            return
+            return True
         self.ui.put(("state", ("Moving...", "darkorange")))
         self.stage.move_absolute(target)
         pos, ack2 = self.stage.wait_ready(on_position=self._report_pos, target=target)
@@ -213,8 +217,25 @@ class StageApp:
         if ack2 in ("L", "W"):
             self.ui.put(("state", ("LIMIT SWITCH - re-zero", "red")))
             self.ui.put(("log", "WARNING: stopped at a limit switch. Re-zero before continuing."))
+            return False
+        if pos != target:
+            self.ui.put(("state", ("Stopped", "darkorange")))
+            self.ui.put(("log", f"Stopped at {pos:+d} before reaching {target:+d}."))
+            return False
+        self.ui.put(("state", ("Ready", "green")))
+        return True
+
+    def _do_max_scan(self):
+        self.ui.put(("log", f"Max scan: {MAX_STEPS:+d} -> {MIN_STEPS:+d} -> 0"))
+        for target in (MAX_STEPS, MIN_STEPS, 0):
+            if self.stop_requested:
+                break
+            if not self._do_move_to(target):
+                break
         else:
-            self.ui.put(("state", ("Ready", "green")))
+            self.ui.put(("log", "Max scan done."))
+            return
+        self.ui.put(("log", "Max scan ended early."))
 
     # ---------------------------------------------------------------- actions
     def connect(self):
@@ -267,12 +288,21 @@ class StageApp:
     def go_zero(self):
         self._submit("go to zero", lambda: self._do_move_to(0))
 
+    def max_scan(self):
+        if not messagebox.askokcancel(
+                "Max scan", f"The stage will move to the positive end ({MAX_STEPS:+d} steps, "
+                            f"{MAX_STEPS * MM_PER_STEP:+.2f} mm), then the negative end ({MIN_STEPS:+d} steps, "
+                            f"{MIN_STEPS * MM_PER_STEP:+.2f} mm), then back to zero.\n\nContinue?"):
+            return
+        self._submit("max scan", self._do_max_scan)
+
     def rezero(self):
         self._submit("re-zero", self._do_rezero)
 
     def stop(self):
         # Bypasses the job queue: the worker releases the serial port between
         # status polls, so this gets through within ~0.1 s.
+        self.stop_requested = True
         if self.stage:
             self.stage.stop()
             self.log("STOP sent.")

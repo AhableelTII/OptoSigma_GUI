@@ -6,6 +6,7 @@ Linux with plain Python.
 
 - Move single steps (about 1 µm) forward or backward, or any step size in steps or mm
 - **Go to zero** button
+- **Max scan** across the full travel: positive end, negative end, back to zero
 - **Re-zero runs automatically at start-up**, and on demand
 - Live position readout in steps and mm
 - STOP button, and travel limits so the stage is never driven past its ends
@@ -91,6 +92,7 @@ tried with no hardware connected.
 | **−1 step** / **+1 step** | move a single step (about 1 µm) |
 | **Go to zero** | return to zero |
 | **Re-zero (home switch)** | find the home switch again and rebuild zero |
+| **Max scan** | move to the positive end (+9,900), then the negative end (−9,900), then back to zero; asks for confirmation first, and STOP ends the whole scan |
 | **STOP** | stop the current move |
 
 The position shown is measured from zero. Zero is defined as the home limit
